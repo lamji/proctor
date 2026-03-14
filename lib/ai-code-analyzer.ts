@@ -181,15 +181,17 @@ const buildTaskProfile = ({ promptComment, currentCode, language }: AnalyzeCodeI
   });
 
   if (!comment) {
-    scores.behavior += 1;
+    scores.style += 1;
   }
 
   const sortedCategories = (Object.keys(scores) as InstructionCategory[]).sort((a, b) => scores[b] - scores[a]);
   const primaryCategory = sortedCategories[0] || 'behavior';
   const secondaryCategory = sortedCategories[1];
 
-  const intentMode: IntentMode =
-    scores.style > 0 && scores.behavior > 0
+  const noCommentMode = comment.length === 0;
+  const intentMode: IntentMode = noCommentMode
+    ? 'style'
+    : scores.style > 0 && scores.behavior > 0
       ? 'mixed'
       : primaryCategory === 'style'
         ? 'style'
@@ -205,7 +207,6 @@ const buildTaskProfile = ({ promptComment, currentCode, language }: AnalyzeCodeI
     /\bdon['’]?t\s+change\b/i.test(comment) ||
     /\bwithout\s+changing\b/i.test(comment);
   const targetFunctionName = extractTargetFunctionName(currentCode);
-  const noCommentMode = comment.length === 0;
 
   if (secondaryCategory && scores[secondaryCategory] > 0 && secondaryCategory !== primaryCategory) {
     codeSignals.push(`Secondary request signal detected: ${secondaryCategory}`);
@@ -235,7 +236,7 @@ const looksLikeCodeRequestRefusal = (completion: string) =>
   );
 
 const looksLikeNoOpResponse = (completion: string) =>
-  /\b(no changes inferred|no changes needed|no modifications? (can be|were)? made|without further instructions|cannot accurately suggest)\b/i.test(
+  /\b(no changes inferred|no changes needed|no modifications? (can be|were)? made|without further instructions|cannot accurately suggest|no clear intent|assuming the intent|no changes are proposed)\b/i.test(
     completion,
   );
 
@@ -456,7 +457,7 @@ const analyzeWithGroq = async ({ promptComment, currentCode, language }: Analyze
 
   const taskProfile = buildTaskProfile({ promptComment, currentCode, language });
   const { intentMode } = taskProfile;
-  const isStyleFixMode = intentMode === 'style';
+  const isStyleFixMode = intentMode === 'style' || taskProfile.noCommentMode;
 
   const basePrompt = [
     'You are a coding completion assistant.',
@@ -510,7 +511,7 @@ const analyzeWithGroq = async ({ promptComment, currentCode, language }: Analyze
       ? `Strict scope mode: function-only. Modify only ${taskProfile.targetFunctionName ?? 'the target function'} and nothing else.`
       : 'Strict scope mode: normal.',
     taskProfile.noCommentMode
-      ? 'No comment prompt detected: infer likely issue(s) from code context and produce one minimal corrective patch.'
+      ? 'No comment prompt detected: treat as style-debug mode. Infer likely style/class/UI issue(s) from code context and produce one minimal corrective patch.'
       : 'Comment prompt detected: follow explicit instruction.',
   ].join('\n');
 
@@ -605,7 +606,8 @@ const analyzeWithGroq = async ({ promptComment, currentCode, language }: Analyze
       prompt,
       'No-comment mode hard requirement:',
       '- Do not return "no changes inferred" or equivalent.',
-      '- Infer one likely issue from current code context.',
+      '- Infer one likely style/class/UI issue from current code context.',
+      '- Prefer fixing invalid utility classes, invalid JSX style attributes, or obvious className issues.',
       '- Return a minimal concrete code patch only.',
     ].join('\n');
 
@@ -721,6 +723,13 @@ const analyzeWithGroq = async ({ promptComment, currentCode, language }: Analyze
         }
       }
     }
+  }
+
+  if (taskProfile.noCommentMode && (!parsed.completion || looksLikeNoOpResponse(parsed.completion) || looksLikeNoOpResponse(parsed.analysis) || looksLikeProseHeavyOutput(parsed.completion))) {
+    return {
+      completion: currentCode.trim(),
+      analysis: 'No-comment mode failed to produce a valid style patch. Returning original context for safety (fail-closed).',
+    };
   }
 
   return parsed;
