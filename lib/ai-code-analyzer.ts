@@ -265,6 +265,70 @@ const sanitizeCompletion = (completion: string) => {
   return text;
 };
 
+const findBlockEndIndex = (text: string, openBraceIndex: number) => {
+  let depth = 0;
+  for (let i = openBraceIndex; i < text.length; i += 1) {
+    if (text[i] === '{') {
+      depth += 1;
+    } else if (text[i] === '}') {
+      depth -= 1;
+      if (depth === 0) {
+        return i;
+      }
+    }
+  }
+  return -1;
+};
+
+const extractNamedFunctionBlock = (text: string, functionName: string) => {
+  const escapedName = functionName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const arrowPattern = new RegExp(`\\bconst\\s+${escapedName}\\s*=\\s*\\([^)]*\\)\\s*=>\\s*\\{`, 'm');
+  const namedPattern = new RegExp(`\\bfunction\\s+${escapedName}\\s*\\([^)]*\\)\\s*\\{`, 'm');
+
+  const arrowMatch = arrowPattern.exec(text);
+  if (arrowMatch?.index !== undefined) {
+    const openBraceIndex = text.indexOf('{', arrowMatch.index);
+    if (openBraceIndex >= 0) {
+      const endIndex = findBlockEndIndex(text, openBraceIndex);
+      if (endIndex > openBraceIndex) {
+        return text.slice(arrowMatch.index, endIndex + 1).trim();
+      }
+    }
+  }
+
+  const namedMatch = namedPattern.exec(text);
+  if (namedMatch?.index !== undefined) {
+    const openBraceIndex = text.indexOf('{', namedMatch.index);
+    if (openBraceIndex >= 0) {
+      const endIndex = findBlockEndIndex(text, openBraceIndex);
+      if (endIndex > openBraceIndex) {
+        return text.slice(namedMatch.index, endIndex + 1).trim();
+      }
+    }
+  }
+
+  return null;
+};
+
+const normalizeFunctionOnlyCompletion = (
+  completion: string,
+  targetFunctionName: string | null,
+) => {
+  const sanitized = sanitizeCompletion(completion);
+  if (!sanitized) {
+    return sanitized;
+  }
+
+  if (targetFunctionName) {
+    const extracted = extractNamedFunctionBlock(sanitized, targetFunctionName);
+    if (extracted) {
+      return extracted;
+    }
+  }
+
+  return sanitized;
+};
+
 const detectQualityIssues = (completion: string, currentCode: string) => {
   const issues: string[] = [];
   const normalized = completion.trim();
@@ -496,10 +560,7 @@ const analyzeWithGroq = async ({ promptComment, currentCode, language }: Analyze
   if (!outputText) {
     return null;
   }
-  const parsed = {
-    ...parseOutput(outputText),
-    completion: sanitizeCompletion(parseOutput(outputText).completion),
-  };
+  const parsed = normalizeParsedOutput(parseOutput(outputText));
 
   if (looksLikeCodeRequestRefusal(parsed.completion)) {
     const noRefusalPrompt = `${prompt}\nHard requirement: Never ask for more code; generate the best possible patch from given context.`;
@@ -516,7 +577,7 @@ const analyzeWithGroq = async ({ promptComment, currentCode, language }: Analyze
       const retryPayload = (await retryResponse.json()) as unknown;
       const retryText = extractResponseText(retryPayload);
       if (retryText) {
-        return parseOutput(retryText);
+        return normalizeParsedOutput(parseOutput(retryText));
       }
     }
   }
@@ -536,7 +597,7 @@ const analyzeWithGroq = async ({ promptComment, currentCode, language }: Analyze
       const retryPayload = (await retryResponse.json()) as unknown;
       const retryText = extractResponseText(retryPayload);
       if (retryText) {
-        return parseOutput(retryText);
+        return normalizeParsedOutput(parseOutput(retryText));
       }
     }
   }
@@ -567,11 +628,7 @@ const analyzeWithGroq = async ({ promptComment, currentCode, language }: Analyze
       const repairPayload = (await repairResponse.json()) as unknown;
       const repairText = extractResponseText(repairPayload);
       if (repairText) {
-        const repaired = parseOutput(repairText);
-        const normalizedRepaired = {
-          ...repaired,
-          completion: sanitizeCompletion(repaired.completion),
-        };
+        const normalizedRepaired = normalizeParsedOutput(parseOutput(repairText));
         const repairedIssues = detectQualityIssues(normalizedRepaired.completion, currentCode);
         if (repairedIssues.length === 0) {
           return normalizedRepaired;
@@ -608,10 +665,7 @@ const analyzeWithGroq = async ({ promptComment, currentCode, language }: Analyze
         const scopeRepairPayload = (await scopeRepairResponse.json()) as unknown;
         const scopeRepairText = extractResponseText(scopeRepairPayload);
         if (scopeRepairText) {
-          const scoped = {
-            ...parseOutput(scopeRepairText),
-            completion: sanitizeCompletion(parseOutput(scopeRepairText).completion),
-          };
+          const scoped = normalizeParsedOutput(parseOutput(scopeRepairText));
           const remainingScopeViolations = detectFunctionOnlyViolations(
             scoped.completion,
             taskProfile.targetFunctionName,
@@ -664,3 +718,9 @@ export const analyzeCodeFromComment = async (input: AnalyzeCodeInput): Promise<A
 
   return fallbackOutput(input);
 };
+  const normalizeParsedOutput = (output: AnalyzeCodeOutput): AnalyzeCodeOutput => ({
+    ...output,
+    completion: taskProfile.functionOnlyMode
+      ? normalizeFunctionOnlyCompletion(output.completion, taskProfile.targetFunctionName)
+      : sanitizeCompletion(output.completion),
+  });
