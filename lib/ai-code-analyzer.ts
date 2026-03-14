@@ -60,6 +60,36 @@ const tailwindDocsKnowledge = [
   'Reference docs: https://tailwindcss.com/docs, https://tailwindcss.com/docs/styling-with-utility-classes, https://tailwindcss.com/docs/responsive-design',
 ].join('\n');
 
+const styleIntentRegex =
+  /\b(style|styling|css|tailwind|className|class|layout|spacing|padding|margin|color|background|bg-|font|ui|align|responsive|hover|focus|design)\b/i;
+
+const behaviorIntentRegex =
+  /\b(function|logic|behavior|flow|algorithm|state|handler|click|onClick|increment|decrement|add|minus|plus|compute|validate|fetch|api|condition|if|else|loop|typescript|javascript|react state)\b/i;
+
+const detectIntentMode = ({ promptComment }: AnalyzeCodeInput): 'style' | 'behavior' | 'mixed' => {
+  const comment = promptComment.trim();
+  if (!comment) {
+    return 'style';
+  }
+
+  const hasStyleIntent = styleIntentRegex.test(comment);
+  const hasBehaviorIntent = behaviorIntentRegex.test(comment);
+
+  if (hasStyleIntent && hasBehaviorIntent) {
+    return 'mixed';
+  }
+
+  if (hasBehaviorIntent) {
+    return 'behavior';
+  }
+
+  if (hasStyleIntent) {
+    return 'style';
+  }
+
+  return 'behavior';
+};
+
 const parseOutput = (text: string): AnalyzeCodeOutput => {
   const completionMarker = /COMPLETION:\s*/i;
   const explanationMarker = /EXPLANATION:\s*/i;
@@ -96,44 +126,57 @@ const analyzeWithGroq = async ({ promptComment, currentCode, language }: Analyze
 
   const model = process.env.GROQ_CODE_MODEL ?? process.env.GROQ_VISION_MODEL ?? 'meta-llama/llama-4-scout-17b-16e-instruct';
 
-  const isStyleFixMode = !promptComment.trim();
+  const intentMode = detectIntentMode({ promptComment, currentCode, language });
+  const isStyleFixMode = intentMode === 'style';
 
   const basePrompt = [
     'You are a coding completion assistant.',
-    'Apply only the explicitly requested change.',
+    'Primary rule: infer the developer intent from Comment Prompt first, then apply only the requested change.',
     'Do not add unrelated improvements, refactors, wrappers, or extra styling.',
     'Preserve structure, behavior, and all existing classes unless the request explicitly says to change them.',
-    'If the request is to add/change a background class, only modify background class tokens.',
-    'Never add spacing classes (p-*, px-*, py-*, m-*, mx-*, my-*) unless explicitly requested.',
     'Return only this format:',
     'COMPLETION:',
     '<code to insert next>',
     'EXPLANATION:',
     '<short reason in <= 80 words>',
     'Do not wrap completion in markdown fences.',
-    'If UI/frontend code is involved, prefer Tailwind CSS utility classes.',
-    'Always use shadcn/ui components for UI building when applicable (Button, Input, Card, Dialog, etc.).',
-    'Prefer composing from existing shadcn/ui components over raw HTML elements when a suitable component exists.',
-    'Avoid inline style objects unless explicitly requested.',
-    'Use layout/spacing utility classes only when explicitly requested.',
-    'For icons, always use lucide-react icons by default.',
-    "Import icons from 'lucide-react' and do not use emoji or other icon libraries unless explicitly requested.",
+    'Do not ask the developer to paste code; the provided context is sufficient.',
   ].join(' ');
 
   const styleFixPrompt = [
-    'No developer comment was provided.',
-    'Treat this as a Tailwind style-repair task.',
-    'Fix broken/weak styling and convert non-Tailwind style patterns to Tailwind utilities.',
-    'Preserve component behavior and structure as much as possible.',
-    'Keep changes minimal and do not add wrappers or spacing classes unless needed for an explicit request.',
+    'Intent mode: STYLE.',
+    'Treat this as a style/UI task.',
+    'If UI/frontend code is involved, prefer Tailwind CSS utility classes.',
+    'Use shadcn/ui components only when explicitly requested or already used in the file.',
+    'If the request is to add/change a background class, only modify background class tokens.',
+    'Never add spacing classes (p-*, px-*, py-*, m-*, mx-*, my-*) unless explicitly requested.',
+    'Avoid inline style objects unless explicitly requested.',
+    'Preserve behavior and structure as much as possible.',
   ].join(' ');
 
-  const commentPrompt = [
-    'A developer comment is provided.',
-    'Follow the comment intent literally and make the smallest possible change.',
+  const behaviorPrompt = [
+    'Intent mode: BEHAVIOR.',
+    'Treat this as a JavaScript/TypeScript functionality task.',
+    'Implement logic/state/handlers required by the comment.',
+    'Do not perform style-only rewrites.',
+    'Do not swap component libraries or rewrite HTML to shadcn unless explicitly requested.',
+    'Keep existing styling/class names unchanged unless the comment explicitly asks for style changes.',
   ].join(' ');
 
-  const prompt = `${basePrompt} ${isStyleFixMode ? styleFixPrompt : commentPrompt}`;
+  const mixedPrompt = [
+    'Intent mode: MIXED.',
+    'Apply both behavior and style requests, but only what is explicitly stated.',
+    'Prioritize correctness of logic first, then minimal style updates.',
+  ].join(' ');
+
+  const prompt =
+    intentMode === 'style'
+      ? `${basePrompt} ${styleFixPrompt}`
+      : intentMode === 'mixed'
+        ? `${basePrompt} ${mixedPrompt}`
+        : `${basePrompt} ${behaviorPrompt}`;
+
+  const contextualKnowledge = isStyleFixMode ? `\n\n${tailwindDocsKnowledge}` : '';
 
   const response = await fetch('https://api.groq.com/openai/v1/responses', {
     method: 'POST',
@@ -150,7 +193,7 @@ const analyzeWithGroq = async ({ promptComment, currentCode, language }: Analyze
           content: [
             {
               type: 'input_text',
-              text: `${prompt}\n\n${tailwindDocsKnowledge}\n\nLanguage: ${language || 'unknown'}\nComment Prompt: ${promptComment || '(none)'}\n\nCurrent Code Context:\n${currentCode}`,
+              text: `${prompt}${contextualKnowledge}\n\nLanguage: ${language || 'unknown'}\nInferred Intent Mode: ${intentMode}\nComment Prompt: ${promptComment || '(none)'}\n\nCurrent Code Context:\n${currentCode}`,
             },
           ],
         },

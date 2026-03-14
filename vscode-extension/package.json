@@ -2,7 +2,7 @@
   "name": "proctor-ai-vscode-agent",
   "displayName": "Proctor AI VSCode Agent",
   "description": "Reads comment intent, requests code completion from your Next.js server, inserts result, and logs it in proctor dashboard.",
-  "version": "0.0.5",
+  "version": "0.0.7",
   "publisher": "local",
   "engines": {
     "vscode": "^1.85.0"
@@ -13,6 +13,7 @@
   ],
   "activationEvents": [
     "onCommand:proctorAi.configure",
+    "onCommand:proctorAi.clearConfig",
     "onCommand:proctorAi.sendSelectionToServer"
   ],
   "main": "./extension.cjs",
@@ -21,6 +22,10 @@
       {
         "command": "proctorAi.configure",
         "title": "Proctor AI: Configure Server"
+      },
+      {
+        "command": "proctorAi.clearConfig",
+        "title": "Proctor AI: Clear Config"
       },
       {
         "command": "proctorAi.sendSelectionToServer",

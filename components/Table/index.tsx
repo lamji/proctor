@@ -77,6 +77,8 @@ const TableSelectableRowDemo = ({value}: TableTypes) => {
     setIsOpenDialog(op)
   }
 
+  
+
   return (
     <div className='w-full'>
       <div className='overflow-hidden h-[50vh]'>

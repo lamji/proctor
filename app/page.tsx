@@ -221,7 +221,7 @@ export default function Page() {
          
         <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
           <h2 className="text-base font-semibold text-slate-900">Credentials</h2>
-          <div className="mt-3 space-y-3">
+          <div className="mt-3 space-y-3 bg-red-100">
             <label className="block space-y-1">
               <span className="text-xs font-medium uppercase tracking-wide text-slate-500">Username</span>
               <input

@@ -65,6 +65,127 @@ const requestJson = ({ url, method, headers = {}, body }) =>
 
 const normalizeBase = (value) => value.trim().replace(/\/$/, '');
 
+const normalizeBlockCommentText = (raw) =>
+  raw
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^\s*\* ?/, '').trim())
+    .filter(Boolean)
+    .join(' ')
+    .trim();
+
+const getInlineCommentText = (line) => {
+  const trimmed = line.trim();
+  if (!trimmed) {
+    return '';
+  }
+
+  const lineCommentMatch = trimmed.match(/^(?:\/\/|#)\s*(.+)$/);
+  if (lineCommentMatch?.[1]) {
+    return lineCommentMatch[1].trim();
+  }
+
+  const blockCommentMatch = trimmed.match(/^\/\*\s*(.+?)\s*\*\/$/);
+  if (blockCommentMatch?.[1]) {
+    return blockCommentMatch[1].trim();
+  }
+
+  return '';
+};
+
+const getFirstBlockCommentText = (text) => {
+  const blockCommentMatch = text.match(/\/\*\*?([\s\S]*?)\*\//);
+  if (!blockCommentMatch?.[1]) {
+    return '';
+  }
+
+  return normalizeBlockCommentText(blockCommentMatch[1]);
+};
+
+const extractPromptComment = (editor, selection, selectedCode) => {
+  const selectedLines = selectedCode.split(/\r?\n/);
+  const selectedBlockComment = getFirstBlockCommentText(selectedCode);
+  if (selectedBlockComment) {
+    return selectedBlockComment;
+  }
+
+  // Prefer an explicit top-of-selection comment directive.
+  for (const rawLine of selectedLines.slice(0, 4)) {
+    const inlineCommentText = getInlineCommentText(rawLine);
+    if (inlineCommentText) {
+      return inlineCommentText;
+    }
+
+    if (!rawLine.trim()) {
+      continue;
+    }
+
+    break;
+  }
+
+  // Fallback: read a contiguous block above the selection to support multiline comments.
+  const nearbyLines = [];
+  for (let lineNo = selection.start.line - 1; lineNo >= Math.max(0, selection.start.line - 20); lineNo -= 1) {
+    const text = editor.document.lineAt(lineNo).text;
+    nearbyLines.unshift(text);
+  }
+  const nearbyBlockComment = getFirstBlockCommentText(nearbyLines.join('\n'));
+  if (nearbyBlockComment) {
+    return nearbyBlockComment;
+  }
+
+  // Fallback: read nearby comment lines above the current selection.
+  for (let lineNo = selection.start.line - 1; lineNo >= Math.max(0, selection.start.line - 8); lineNo -= 1) {
+    const line = editor.document.lineAt(lineNo).text;
+    const inlineCommentText = getInlineCommentText(line);
+    if (inlineCommentText) {
+      return inlineCommentText;
+    }
+
+    if (!line.trim()) {
+      continue;
+    }
+
+    // Stop once we hit real code above the selection.
+    break;
+  }
+
+  return '';
+};
+
+const looksLikeCode = (text) =>
+  /(import\s|export\s|const\s|let\s|var\s|function\s|class\s|=>|return\s|if\s*\(|for\s*\(|while\s*\(|\{|\}|;)/.test(
+    text,
+  );
+
+const buildCurrentCodeContext = (editor, selection, selectedCode) => {
+  const document = editor.document;
+  const contextStart = Math.max(0, selection.start.line - 60);
+  const contextEnd = Math.min(document.lineCount - 1, selection.end.line + 60);
+  const contextRange = new vscode.Range(
+    contextStart,
+    0,
+    contextEnd,
+    document.lineAt(contextEnd).text.length,
+  );
+  const nearbyContext = document.getText(contextRange).trim();
+
+  const selectedLooksLikeCode = looksLikeCode(selectedCode);
+  if (selectedLooksLikeCode) {
+    return selectedCode;
+  }
+
+  return [
+    `File Path: ${document.fileName}`,
+    `Language: ${document.languageId}`,
+    `Selection Lines: ${selection.start.line + 1}-${selection.end.line + 1}`,
+    'Selected Snippet:',
+    selectedCode || '(empty selection)',
+    '',
+    'Nearby File Context:',
+    nearbyContext,
+  ].join('\n');
+};
+
 const ensureConfig = async (context) => {
   let apiBase = context.globalState.get(KEYS.apiBase) || '';
   let username = context.globalState.get(KEYS.username) || '';
@@ -155,6 +276,8 @@ const sendSelectionToServer = async (context) => {
   if (!selectedCode) {
     throw new Error('Selected code is empty.');
   }
+  const promptComment = extractPromptComment(editor, selection, selectedCode);
+  const currentCodeContext = buildCurrentCodeContext(editor, selection, selectedCode);
 
   const doRequest = async (token) =>
     requestJson({
@@ -164,8 +287,8 @@ const sendSelectionToServer = async (context) => {
         Authorization: `Bearer ${token}`,
       },
       body: {
-        promptComment: '',
-        currentCode: selectedCode,
+        promptComment,
+        currentCode: currentCodeContext,
         language: editor.document.languageId,
       },
     });
@@ -191,9 +314,21 @@ const configure = async (context) => {
   vscode.window.showInformationMessage('Proctor AI configuration saved.');
 };
 
+const clearConfig = async (context) => {
+  await context.globalState.update(KEYS.apiBase, '');
+  await context.globalState.update(KEYS.username, '');
+  await context.globalState.update(KEYS.password, '');
+  await context.globalState.update(KEYS.authToken, '');
+  vscode.window.showInformationMessage('Proctor AI configuration cleared.');
+};
+
 function activate(context) {
   context.subscriptions.push(
     vscode.commands.registerCommand('proctorAi.configure', () => configure(context)),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('proctorAi.clearConfig', () => clearConfig(context)),
   );
 
   context.subscriptions.push(
