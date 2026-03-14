@@ -11,6 +11,18 @@ type AnalyzeCodeOutput = {
   analysis: string;
 };
 
+type IntentMode = 'style' | 'behavior' | 'mixed';
+type InstructionCategory = 'behavior' | 'style' | 'refactor' | 'tests' | 'docs';
+
+type TaskProfile = {
+  intentMode: IntentMode;
+  primaryCategory: InstructionCategory;
+  requestedActions: string[];
+  constraints: string[];
+  mentionedIdentifiers: string[];
+  codeSignals: string[];
+};
+
 const DEFAULT_MAX_OUTPUT_TOKENS = 900;
 
 const resolveMaxOutputTokens = () => {
@@ -60,35 +72,140 @@ const tailwindDocsKnowledge = [
   'Reference docs: https://tailwindcss.com/docs, https://tailwindcss.com/docs/styling-with-utility-classes, https://tailwindcss.com/docs/responsive-design',
 ].join('\n');
 
-const styleIntentRegex =
-  /\b(style|styling|css|tailwind|className|class|layout|spacing|padding|margin|color|background|bg-|font|ui|align|responsive|hover|focus|design)\b/i;
-
-const behaviorIntentRegex =
-  /\b(function|logic|behavior|flow|algorithm|state|handler|click|onClick|increment|decrement|add|minus|plus|compute|validate|fetch|api|condition|if|else|loop|typescript|javascript|react state)\b/i;
-
-const detectIntentMode = ({ promptComment }: AnalyzeCodeInput): 'style' | 'behavior' | 'mixed' => {
-  const comment = promptComment.trim();
-  if (!comment) {
-    return 'style';
-  }
-
-  const hasStyleIntent = styleIntentRegex.test(comment);
-  const hasBehaviorIntent = behaviorIntentRegex.test(comment);
-
-  if (hasStyleIntent && hasBehaviorIntent) {
-    return 'mixed';
-  }
-
-  if (hasBehaviorIntent) {
-    return 'behavior';
-  }
-
-  if (hasStyleIntent) {
-    return 'style';
-  }
-
-  return 'behavior';
+const categorySignals: Record<InstructionCategory, RegExp> = {
+  behavior:
+    /\b(function|logic|behavior|flow|algorithm|state|handler|click|onclick|increment|decrement|add|minus|plus|compute|validate|fetch|api|condition|if|else|loop|typescript|javascript|bug|fix|implement)\b/i,
+  style:
+    /\b(style|styling|css|tailwind|classname|class|layout|spacing|padding|margin|color|background|bg-|font|ui|align|responsive|hover|focus|design|visual)\b/i,
+  refactor: /\b(refactor|cleanup|simplify|restructure|optimize|improve readability)\b/i,
+  tests: /\b(test|tests|unit test|integration|assert|coverage|jest|vitest|playwright)\b/i,
+  docs: /\b(comment|docs|documentation|explain|readme|description|typing)\b/i,
 };
+
+const extractRequestedActions = (text: string) => {
+  const normalized = text.toLowerCase();
+  const verbs = [
+    'add',
+    'remove',
+    'fix',
+    'implement',
+    'update',
+    'replace',
+    'refactor',
+    'optimize',
+    'validate',
+    'calculate',
+    'handle',
+    'wire',
+  ];
+
+  return verbs.filter((verb) => new RegExp(`\\b${verb}\\b`, 'i').test(normalized));
+};
+
+const extractConstraints = (text: string) =>
+  text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => /\b(only|must|should|do not|don't|without|keep|preserve|exact|strict|cannot|never)\b/i.test(line))
+    .slice(0, 8);
+
+const extractMentionedIdentifiers = (text: string) => {
+  const inlineCodeMatches = [...text.matchAll(/`([^`]+)`/g)].map((match) => match[1]?.trim()).filter(Boolean) as string[];
+  const identifierMatches = [...text.matchAll(/\b([a-zA-Z_$][\w$]{2,})\b/g)]
+    .map((match) => match[1])
+    .filter((token) => /[A-Z_]|[a-z].*[A-Z]/.test(token) || /^(on|handle|set|get|use)[A-Z]/.test(token))
+    .slice(0, 10);
+
+  return [...new Set([...inlineCodeMatches, ...identifierMatches])].slice(0, 12);
+};
+
+const extractCodeSignals = (code: string, language?: string) => {
+  const signals: string[] = [];
+  const lowerLang = (language || '').toLowerCase();
+  if (lowerLang) {
+    signals.push(`Language appears to be: ${lowerLang}`);
+  }
+
+  if (/\buseState\b|\buseMemo\b|\buseEffect\b/.test(code)) {
+    signals.push('Uses React hooks/stateful component patterns.');
+  }
+  if (/\bclassName=/.test(code) || /\btailwind\b/i.test(code)) {
+    signals.push('Contains utility-class based styling (Tailwind-like).');
+  }
+  if (/from\s+['"]@\/components\/ui\//.test(code) || /from\s+['"]@shadcn\/ui['"]/.test(code)) {
+    signals.push('Uses shadcn/ui component imports.');
+  }
+  if (/function\s+\w+\s*\(|const\s+\w+\s*=\s*\(/.test(code)) {
+    signals.push('Contains function boundaries suitable for focused code patching.');
+  }
+  if (/TODO|FIXME|\/\*\*?[\s\S]*?\*\//.test(code)) {
+    signals.push('Contains inline comments/TODOs that may define instruction scope.');
+  }
+
+  return signals.slice(0, 8);
+};
+
+const buildTaskProfile = ({ promptComment, currentCode, language }: AnalyzeCodeInput): TaskProfile => {
+  const comment = promptComment.trim();
+  const normalizedComment = comment.toLowerCase();
+  const scores: Record<InstructionCategory, number> = {
+    behavior: 0,
+    style: 0,
+    refactor: 0,
+    tests: 0,
+    docs: 0,
+  };
+
+  (Object.keys(categorySignals) as InstructionCategory[]).forEach((category) => {
+    if (categorySignals[category].test(normalizedComment)) {
+      scores[category] += 2;
+    }
+  });
+
+  if (!comment) {
+    scores.behavior += 1;
+  }
+
+  const sortedCategories = (Object.keys(scores) as InstructionCategory[]).sort((a, b) => scores[b] - scores[a]);
+  const primaryCategory = sortedCategories[0] || 'behavior';
+  const secondaryCategory = sortedCategories[1];
+
+  const intentMode: IntentMode =
+    scores.style > 0 && scores.behavior > 0
+      ? 'mixed'
+      : primaryCategory === 'style'
+        ? 'style'
+        : 'behavior';
+
+  const requestedActions = extractRequestedActions(comment);
+  const constraints = extractConstraints(comment);
+  const mentionedIdentifiers = extractMentionedIdentifiers(comment);
+  const codeSignals = extractCodeSignals(currentCode, language);
+
+  if (secondaryCategory && scores[secondaryCategory] > 0 && secondaryCategory !== primaryCategory) {
+    codeSignals.push(`Secondary request signal detected: ${secondaryCategory}`);
+  }
+
+  return {
+    intentMode,
+    primaryCategory,
+    requestedActions,
+    constraints,
+    mentionedIdentifiers,
+    codeSignals,
+  };
+};
+
+const looksLikeStyleRewrite = (completion: string) =>
+  /\b(className\s*=|style\s*=|tailwind|bg-|text-|p-\d|m-\d|from\s+['"]@shadcn\/ui['"]|lucide-react)\b/i.test(
+    completion,
+  );
+
+const looksLikeCodeRequestRefusal = (completion: string) =>
+  /\b(no code to complete|provide the code|paste the code|insufficient code|cannot proceed without code)\b/i.test(
+    completion,
+  );
 
 const parseOutput = (text: string): AnalyzeCodeOutput => {
   const completionMarker = /COMPLETION:\s*/i;
@@ -126,14 +243,15 @@ const analyzeWithGroq = async ({ promptComment, currentCode, language }: Analyze
 
   const model = process.env.GROQ_CODE_MODEL ?? process.env.GROQ_VISION_MODEL ?? 'meta-llama/llama-4-scout-17b-16e-instruct';
 
-  const intentMode = detectIntentMode({ promptComment, currentCode, language });
+  const taskProfile = buildTaskProfile({ promptComment, currentCode, language });
+  const { intentMode } = taskProfile;
   const isStyleFixMode = intentMode === 'style';
 
   const basePrompt = [
     'You are a coding completion assistant.',
-    'Primary rule: infer the developer intent from Comment Prompt first, then apply only the requested change.',
+    'Primary rule: infer the developer intent from Comment Prompt and Current Code Context, then apply only requested changes.',
     'Do not add unrelated improvements, refactors, wrappers, or extra styling.',
-    'Preserve structure, behavior, and all existing classes unless the request explicitly says to change them.',
+    'Preserve unchanged parts of structure and behavior unless the instruction explicitly asks to change them.',
     'Return only this format:',
     'COMPLETION:',
     '<code to insert next>',
@@ -143,40 +261,68 @@ const analyzeWithGroq = async ({ promptComment, currentCode, language }: Analyze
     'Do not ask the developer to paste code; the provided context is sufficient.',
   ].join(' ');
 
-  const styleFixPrompt = [
-    'Intent mode: STYLE.',
-    'Treat this as a style/UI task.',
-    'If UI/frontend code is involved, prefer Tailwind CSS utility classes.',
-    'Use shadcn/ui components only when explicitly requested or already used in the file.',
-    'If the request is to add/change a background class, only modify background class tokens.',
-    'Never add spacing classes (p-*, px-*, py-*, m-*, mx-*, my-*) unless explicitly requested.',
-    'Avoid inline style objects unless explicitly requested.',
-    'Preserve behavior and structure as much as possible.',
-  ].join(' ');
-
   const behaviorPrompt = [
     'Intent mode: BEHAVIOR.',
-    'Treat this as a JavaScript/TypeScript functionality task.',
-    'Implement logic/state/handlers required by the comment.',
-    'Do not perform style-only rewrites.',
-    'Do not swap component libraries or rewrite HTML to shadcn unless explicitly requested.',
-    'Keep existing styling/class names unchanged unless the comment explicitly asks for style changes.',
+    'Focus on functionality, state transitions, data handling, and event logic.',
+    'Avoid style rewrites unless explicitly requested.',
+    'Do not swap UI libraries unless explicitly requested.',
+  ].join(' ');
+
+  const styleFixPrompt = [
+    'Intent mode: STYLE.',
+    'Focus on UI/styling/layout changes.',
+    'Preserve behavior and logic unless explicitly requested.',
+    'Prefer existing styling conventions from context.',
   ].join(' ');
 
   const mixedPrompt = [
     'Intent mode: MIXED.',
-    'Apply both behavior and style requests, but only what is explicitly stated.',
-    'Prioritize correctness of logic first, then minimal style updates.',
+    'Handle both logic and style only where comment explicitly requests both.',
+    'Prioritize logic correctness before visual refinements.',
   ].join(' ');
+
+  const dynamicProfilePrompt = [
+    `Primary category: ${taskProfile.primaryCategory}.`,
+    taskProfile.requestedActions.length
+      ? `Requested actions: ${taskProfile.requestedActions.join(', ')}.`
+      : 'Requested actions: infer from imperative phrases in comment.',
+    taskProfile.constraints.length
+      ? `Explicit constraints:\n- ${taskProfile.constraints.join('\n- ')}`
+      : 'Explicit constraints: none detected; keep edits minimal and focused.',
+    taskProfile.mentionedIdentifiers.length
+      ? `Likely target identifiers/symbols: ${taskProfile.mentionedIdentifiers.join(', ')}.`
+      : 'Likely target identifiers/symbols: infer from code nearest to comment.',
+    taskProfile.codeSignals.length
+      ? `Code signals:\n- ${taskProfile.codeSignals.join('\n- ')}`
+      : 'Code signals: use current code structure to infer patch location.',
+  ].join('\n');
 
   const prompt =
     intentMode === 'style'
-      ? `${basePrompt} ${styleFixPrompt}`
+      ? `${basePrompt} ${styleFixPrompt}\n${dynamicProfilePrompt}`
       : intentMode === 'mixed'
-        ? `${basePrompt} ${mixedPrompt}`
-        : `${basePrompt} ${behaviorPrompt}`;
+        ? `${basePrompt} ${mixedPrompt}\n${dynamicProfilePrompt}`
+        : `${basePrompt} ${behaviorPrompt}\n${dynamicProfilePrompt}`;
 
   const contextualKnowledge = isStyleFixMode ? `\n\n${tailwindDocsKnowledge}` : '';
+
+  const buildRequestBody = (activePrompt: string) => ({
+    model,
+    max_output_tokens: resolveMaxOutputTokens(),
+    temperature: 0.1,
+    top_p: 0.9,
+    input: [
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'input_text',
+            text: `${activePrompt}${contextualKnowledge}\n\nLanguage: ${language || 'unknown'}\nInferred Intent Mode: ${intentMode}\nComment Prompt: ${promptComment || '(none)'}\n\nCurrent Code Context:\n${currentCode}`,
+          },
+        ],
+      },
+    ],
+  });
 
   const response = await fetch('https://api.groq.com/openai/v1/responses', {
     method: 'POST',
@@ -184,21 +330,7 @@ const analyzeWithGroq = async ({ promptComment, currentCode, language }: Analyze
       'Content-Type': 'application/json',
       Authorization: `Bearer ${apiKey}`,
     },
-    body: JSON.stringify({
-      model,
-      max_output_tokens: resolveMaxOutputTokens(),
-      input: [
-        {
-          role: 'user',
-          content: [
-            {
-              type: 'input_text',
-              text: `${prompt}${contextualKnowledge}\n\nLanguage: ${language || 'unknown'}\nInferred Intent Mode: ${intentMode}\nComment Prompt: ${promptComment || '(none)'}\n\nCurrent Code Context:\n${currentCode}`,
-            },
-          ],
-        },
-      ],
-    }),
+    body: JSON.stringify(buildRequestBody(prompt)),
   });
 
   if (!response.ok) {
@@ -211,8 +343,49 @@ const analyzeWithGroq = async ({ promptComment, currentCode, language }: Analyze
   if (!outputText) {
     return null;
   }
+  const parsed = parseOutput(outputText);
 
-  return parseOutput(outputText);
+  if (looksLikeCodeRequestRefusal(parsed.completion)) {
+    const noRefusalPrompt = `${prompt}\nHard requirement: Never ask for more code; generate the best possible patch from given context.`;
+    const retryResponse = await fetch('https://api.groq.com/openai/v1/responses', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(buildRequestBody(noRefusalPrompt)),
+    });
+
+    if (retryResponse.ok) {
+      const retryPayload = (await retryResponse.json()) as unknown;
+      const retryText = extractResponseText(retryPayload);
+      if (retryText) {
+        return parseOutput(retryText);
+      }
+    }
+  }
+
+  if (intentMode === 'behavior' && looksLikeStyleRewrite(parsed.completion)) {
+    const strictBehaviorPrompt = `${basePrompt} ${behaviorPrompt} Never modify className, style props, UI library imports, or visual classes for behavior-only tasks.`;
+    const retryResponse = await fetch('https://api.groq.com/openai/v1/responses', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(buildRequestBody(strictBehaviorPrompt)),
+    });
+
+    if (retryResponse.ok) {
+      const retryPayload = (await retryResponse.json()) as unknown;
+      const retryText = extractResponseText(retryPayload);
+      if (retryText) {
+        return parseOutput(retryText);
+      }
+    }
+  }
+
+  return parsed;
 };
 
 const fallbackOutput = ({ promptComment }: AnalyzeCodeInput): AnalyzeCodeOutput => ({

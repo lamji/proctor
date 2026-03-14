@@ -1,40 +1,85 @@
-import React from 'react'
+import { useMemo, useState } from 'react'
 
-export default function AddReappointment({totalPoints}:any) {
+type AddReappointmentProps = {
+  totalPoints: number
+}
 
-    /**
-     * RPG game that assign points based on streght and speed attribute of character
-     * ex totalPoints is 5 
-     * if strength is add it minus the total points
-     * if stringth is already 5 total points become 0
-     * if speed add plus 1 this will reduce 1 from strhgth until strength become 0 and speed become 5
-     * Now clicking speed minu, ite will minu from speed and add on totalPoints untill speed 0 and total points is 5
-     */
-    return (
-        <div>
-            Character stats: <span>{totalPoints}</span> points
-            <div>
-                <button>-</button>
-                <input
-                    type="number"
-                    step="1"
-                    style={{ width: "50px", textAlign: "center" }}
-                    readOnly
-                />
-                <button>+</button>
-                Strength
-            </div>
-            <div>
-                <button>-</button>
-                <input
-                    type="number"
-                    step="1"
-                    style={{ width: "50px", textAlign: "center" }}
-                    readOnly
-                />
-                <button>+</button>
-                Speed
-            </div>
-        </div>
-    );
+type StatKey = 'strength' | 'speed'
+
+export default function AddReappointment({ totalPoints }: AddReappointmentProps) {
+  const [stats, setStats] = useState<{ strength: number; speed: number }>({
+    strength: 0,
+    speed: 0,
+  })
+
+  const remainingPoints = useMemo(
+    () => totalPoints - (stats.strength + stats.speed),
+    [stats.speed, stats.strength, totalPoints]
+  )
+
+  const increaseStat = (key: StatKey) => {
+    const otherKey: StatKey = key === 'strength' ? 'speed' : 'strength'
+
+    setStats((prev) => {
+      if (prev[key] >= totalPoints) {
+        return prev
+      }
+
+      const spentPoints = prev.strength + prev.speed
+
+      if (spentPoints < totalPoints) {
+        return { ...prev, [key]: prev[key] + 1 }
+      }
+
+      if (prev[otherKey] > 0) {
+        return {
+          ...prev,
+          [key]: prev[key] + 1,
+          [otherKey]: prev[otherKey] - 1,
+        }
+      }
+
+      return prev
+    })
+  }
+
+  const decreaseStat = (key: StatKey) => {
+    setStats((prev) => {
+      if (prev[key] <= 0) {
+        return prev
+      }
+
+      return { ...prev, [key]: prev[key] - 1 }
+    })
+  }
+
+  return (
+    <div>
+      Character stats: <span>{remainingPoints}</span> points
+      <div>
+        <button onClick={() => decreaseStat('strength')}>-</button>
+        <input
+          type='number'
+          step='1'
+          value={stats.strength}
+          style={{ width: '50px', textAlign: 'center' }}
+          readOnly
+        />
+        <button onClick={() => increaseStat('strength')}>+</button>
+        Strength
+      </div>
+      <div>
+        <button onClick={() => decreaseStat('speed')}>-</button>
+        <input
+          type='number'
+          step='1'
+          value={stats.speed}
+          style={{ width: '50px', textAlign: 'center' }}
+          readOnly
+        />
+        <button onClick={() => increaseStat('speed')}>+</button>
+        Speed
+      </div>
+    </div>
+  )
 }
