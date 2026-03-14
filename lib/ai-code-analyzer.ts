@@ -21,6 +21,8 @@ type TaskProfile = {
   constraints: string[];
   mentionedIdentifiers: string[];
   codeSignals: string[];
+  functionOnlyMode: boolean;
+  targetFunctionName: string | null;
 };
 
 const DEFAULT_MAX_OUTPUT_TOKENS = 900;
@@ -120,6 +122,20 @@ const extractMentionedIdentifiers = (text: string) => {
   return [...new Set([...inlineCodeMatches, ...identifierMatches])].slice(0, 12);
 };
 
+const extractTargetFunctionName = (code: string) => {
+  const constFnMatch = code.match(/\bconst\s+([a-zA-Z_$][\w$]*)\s*=\s*\(/);
+  if (constFnMatch?.[1]) {
+    return constFnMatch[1];
+  }
+
+  const namedFnMatch = code.match(/\bfunction\s+([a-zA-Z_$][\w$]*)\s*\(/);
+  if (namedFnMatch?.[1]) {
+    return namedFnMatch[1];
+  }
+
+  return null;
+};
+
 const extractCodeSignals = (code: string, language?: string) => {
   const signals: string[] = [];
   const lowerLang = (language || '').toLowerCase();
@@ -182,6 +198,12 @@ const buildTaskProfile = ({ promptComment, currentCode, language }: AnalyzeCodeI
   const constraints = extractConstraints(comment);
   const mentionedIdentifiers = extractMentionedIdentifiers(comment);
   const codeSignals = extractCodeSignals(currentCode, language);
+  const functionOnlyMode =
+    /\b(just|only)\s+(create|implement|write)\s+(a\s+)?function\b/i.test(comment) ||
+    /\bdo\s+not\s+change\b/i.test(comment) ||
+    /\bdon['’]?t\s+change\b/i.test(comment) ||
+    /\bwithout\s+changing\b/i.test(comment);
+  const targetFunctionName = extractTargetFunctionName(currentCode);
 
   if (secondaryCategory && scores[secondaryCategory] > 0 && secondaryCategory !== primaryCategory) {
     codeSignals.push(`Secondary request signal detected: ${secondaryCategory}`);
@@ -194,6 +216,8 @@ const buildTaskProfile = ({ promptComment, currentCode, language }: AnalyzeCodeI
     constraints,
     mentionedIdentifiers,
     codeSignals,
+    functionOnlyMode,
+    targetFunctionName,
   };
 };
 
@@ -206,6 +230,121 @@ const looksLikeCodeRequestRefusal = (completion: string) =>
   /\b(no code to complete|provide the code|paste the code|insufficient code|cannot proceed without code)\b/i.test(
     completion,
   );
+
+const looksLikeProseHeavyOutput = (completion: string) =>
+  /\b(however|alternative|assuming|for a more precise fix|likely|isn['’]?t specified|consider defining|based on the given instructions)\b/i.test(
+    completion,
+  );
+
+const sanitizeCompletion = (completion: string) => {
+  let text = completion.trim();
+  if (!text) {
+    return text;
+  }
+
+  // If model leaked repeated sections, keep only the first completion segment.
+  const repeatedCompletionIndex = text.toUpperCase().indexOf('\nCOMPLETION:', 1);
+  if (repeatedCompletionIndex > 0) {
+    text = text.slice(0, repeatedCompletionIndex).trim();
+  }
+
+  // Remove explanatory tail if model appended natural-language analysis.
+  const proseStart = text.search(
+    /\n(?:However|But since|A more accurate implementation|For a more precise fix|Let's assume)/i,
+  );
+  if (proseStart > 0) {
+    text = text.slice(0, proseStart).trim();
+  }
+
+  // Unwrap fenced code if present.
+  const fenced = text.match(/```[a-zA-Z]*\n([\s\S]*?)```/);
+  if (fenced?.[1]) {
+    return fenced[1].trim();
+  }
+
+  return text;
+};
+
+const detectQualityIssues = (completion: string, currentCode: string) => {
+  const issues: string[] = [];
+  const normalized = completion.trim();
+
+  if (!normalized) {
+    issues.push('Completion is empty.');
+    return issues;
+  }
+
+  const hasComponentInContext = /\bfunction\s+[A-Z]\w*\s*\(|\bconst\s+[A-Z]\w*\s*=\s*\(/.test(currentCode);
+  const functionDecls = normalized.match(/\bfunction\s+[A-Z]\w*\s*\(/g) ?? [];
+  if (hasComponentInContext && functionDecls.length > 1) {
+    issues.push('Completion appears to redeclare component scaffolding multiple times.');
+  }
+
+  const hasRootInContext = /\bcreateRoot\s*\(/.test(currentCode);
+  if (hasRootInContext && /\bcreateRoot\s*\(/.test(normalized)) {
+    issues.push('Completion duplicates local render root bootstrapping already present in context.');
+  }
+
+  if (/\bconst\s*\[\s*totalPoints\s*,\s*setTotalPoints\s*\]\s*=/.test(normalized)) {
+    issues.push('Completion creates state for totalPoints; this often shadows/duplicates incoming props.');
+  }
+
+  if (/\bsetStrength\(\s*strength\s*-\s*1\s*\)/.test(normalized) && !/\bstrength\s*>\s*0\b/.test(normalized)) {
+    issues.push('Completion decrements strength without clear non-negative guard.');
+  }
+
+  if (/\bsetSpeed\(\s*speed\s*-\s*1\s*\)/.test(normalized) && !/\bspeed\s*>\s*0\b/.test(normalized)) {
+    issues.push('Completion decrements speed without clear non-negative guard.');
+  }
+
+  if (!/COMPLETION:|EXPLANATION:/i.test(normalized) && normalized.length > 3000) {
+    issues.push('Completion is excessively large and likely includes duplicated unrelated code.');
+  }
+  if (looksLikeProseHeavyOutput(normalized)) {
+    issues.push('Completion includes explanation/prose instead of code-only output.');
+  }
+
+  return issues;
+};
+
+const detectFunctionOnlyViolations = (
+  completion: string,
+  targetFunctionName: string | null,
+) => {
+  const violations: string[] = [];
+  const normalized = completion.trim();
+
+  if (/\bimport\s+.+from\s+['"]/.test(normalized)) {
+    violations.push('Adds or edits imports, but task is function-only.');
+  }
+  if (/\bcreateRoot\s*\(|\broot\.render\s*\(|document\.body\.innerHTML/.test(normalized)) {
+    violations.push('Touches app bootstrap/render root code, which is outside function scope.');
+  }
+  if (/\breturn\s*\(\s*</.test(normalized)) {
+    violations.push('Includes JSX/component body instead of function-only logic.');
+  }
+  if (/\buseState\s*\(|\buseEffect\s*\(|\buseMemo\s*\(/.test(normalized)) {
+    violations.push('Introduces hook/state changes outside requested function-only scope.');
+  }
+  if (/\bconst\s+(strength|speed|totalPoints)\b/.test(normalized)) {
+    violations.push('Declares strength/speed/totalPoints instead of implementing only target function logic.');
+  }
+  const targetDeclPattern = targetFunctionName
+    ? new RegExp(`\\bconst\\s+${targetFunctionName}\\s*=`, 'g')
+    : /\bconst\s+[a-zA-Z_$][\w$]*\s*=/g;
+  const targetDeclMatches = normalized.match(targetDeclPattern) ?? [];
+  if (targetDeclMatches.length > 1) {
+    violations.push('Redeclares target function multiple times.');
+  }
+  if (looksLikeProseHeavyOutput(normalized)) {
+    violations.push('Includes explanatory prose in function-only output.');
+  }
+  if (targetFunctionName && !new RegExp(`\\b${targetFunctionName}\\b`).test(normalized)) {
+    violations.push(`Output does not appear to target function: ${targetFunctionName}.`);
+  }
+
+  return violations;
+};
 
 const parseOutput = (text: string): AnalyzeCodeOutput => {
   const completionMarker = /COMPLETION:\s*/i;
@@ -295,14 +434,28 @@ const analyzeWithGroq = async ({ promptComment, currentCode, language }: Analyze
     taskProfile.codeSignals.length
       ? `Code signals:\n- ${taskProfile.codeSignals.join('\n- ')}`
       : 'Code signals: use current code structure to infer patch location.',
+    taskProfile.functionOnlyMode
+      ? `Strict scope mode: function-only. Modify only ${taskProfile.targetFunctionName ?? 'the target function'} and nothing else.`
+      : 'Strict scope mode: normal.',
   ].join('\n');
+
+  const functionOnlyPrompt = taskProfile.functionOnlyMode
+    ? [
+        'HARD CONSTRAINTS:',
+        `- Edit only function: ${taskProfile.targetFunctionName ?? 'target function in context'}.`,
+        '- Do not add imports.',
+        '- Do not modify component JSX.',
+        '- Do not add or modify createRoot/root.render/document.body lines.',
+        '- Return only the function implementation patch.',
+      ].join('\n')
+    : '';
 
   const prompt =
     intentMode === 'style'
-      ? `${basePrompt} ${styleFixPrompt}\n${dynamicProfilePrompt}`
+      ? `${basePrompt} ${styleFixPrompt}\n${dynamicProfilePrompt}\n${functionOnlyPrompt}`
       : intentMode === 'mixed'
-        ? `${basePrompt} ${mixedPrompt}\n${dynamicProfilePrompt}`
-        : `${basePrompt} ${behaviorPrompt}\n${dynamicProfilePrompt}`;
+        ? `${basePrompt} ${mixedPrompt}\n${dynamicProfilePrompt}\n${functionOnlyPrompt}`
+        : `${basePrompt} ${behaviorPrompt}\n${dynamicProfilePrompt}\n${functionOnlyPrompt}`;
 
   const contextualKnowledge = isStyleFixMode ? `\n\n${tailwindDocsKnowledge}` : '';
 
@@ -343,7 +496,10 @@ const analyzeWithGroq = async ({ promptComment, currentCode, language }: Analyze
   if (!outputText) {
     return null;
   }
-  const parsed = parseOutput(outputText);
+  const parsed = {
+    ...parseOutput(outputText),
+    completion: sanitizeCompletion(parseOutput(outputText).completion),
+  };
 
   if (looksLikeCodeRequestRefusal(parsed.completion)) {
     const noRefusalPrompt = `${prompt}\nHard requirement: Never ask for more code; generate the best possible patch from given context.`;
@@ -381,6 +537,89 @@ const analyzeWithGroq = async ({ promptComment, currentCode, language }: Analyze
       const retryText = extractResponseText(retryPayload);
       if (retryText) {
         return parseOutput(retryText);
+      }
+    }
+  }
+
+  const qualityIssues = detectQualityIssues(parsed.completion, currentCode);
+  if (qualityIssues.length > 0) {
+    const repairPrompt = [
+      prompt,
+      'Quality gate failed. Rewrite the completion so it is valid and minimal.',
+      'Do not duplicate existing scaffolding from Current Code Context.',
+      'Do not redeclare root render/bootstrap code if already present.',
+      'Do not shadow props with same-name state variables.',
+      'Keep handlers and state transitions safe (no negative stat transitions).',
+      'Detected issues:',
+      ...qualityIssues.map((issue) => `- ${issue}`),
+    ].join('\n');
+
+    const repairResponse = await fetch('https://api.groq.com/openai/v1/responses', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(buildRequestBody(repairPrompt)),
+    });
+
+    if (repairResponse.ok) {
+      const repairPayload = (await repairResponse.json()) as unknown;
+      const repairText = extractResponseText(repairPayload);
+      if (repairText) {
+        const repaired = parseOutput(repairText);
+        const normalizedRepaired = {
+          ...repaired,
+          completion: sanitizeCompletion(repaired.completion),
+        };
+        const repairedIssues = detectQualityIssues(normalizedRepaired.completion, currentCode);
+        if (repairedIssues.length === 0) {
+          return normalizedRepaired;
+        }
+      }
+    }
+  }
+
+  if (taskProfile.functionOnlyMode) {
+    const scopeViolations = detectFunctionOnlyViolations(
+      parsed.completion,
+      taskProfile.targetFunctionName,
+    );
+
+    if (scopeViolations.length > 0) {
+      const scopeRepairPrompt = [
+        prompt,
+        'Scope gate failed. Rewrite output to satisfy strict function-only scope.',
+        'Do not touch any non-function lines.',
+        'Violations:',
+        ...scopeViolations.map((violation) => `- ${violation}`),
+      ].join('\n');
+
+      const scopeRepairResponse = await fetch('https://api.groq.com/openai/v1/responses', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify(buildRequestBody(scopeRepairPrompt)),
+      });
+
+      if (scopeRepairResponse.ok) {
+        const scopeRepairPayload = (await scopeRepairResponse.json()) as unknown;
+        const scopeRepairText = extractResponseText(scopeRepairPayload);
+        if (scopeRepairText) {
+          const scoped = {
+            ...parseOutput(scopeRepairText),
+            completion: sanitizeCompletion(parseOutput(scopeRepairText).completion),
+          };
+          const remainingScopeViolations = detectFunctionOnlyViolations(
+            scoped.completion,
+            taskProfile.targetFunctionName,
+          );
+          if (remainingScopeViolations.length === 0) {
+            return scoped;
+          }
+        }
       }
     }
   }
