@@ -541,6 +541,13 @@ const analyzeWithGroq = async ({ promptComment, currentCode, language }: Analyze
     ],
   });
 
+  const normalizeParsedOutput = (output: AnalyzeCodeOutput): AnalyzeCodeOutput => ({
+    ...output,
+    completion: taskProfile.functionOnlyMode
+      ? normalizeFunctionOnlyCompletion(output.completion, taskProfile.targetFunctionName)
+      : sanitizeCompletion(output.completion),
+  });
+
   const response = await fetch('https://api.groq.com/openai/v1/responses', {
     method: 'POST',
     headers: {
@@ -718,9 +725,3 @@ export const analyzeCodeFromComment = async (input: AnalyzeCodeInput): Promise<A
 
   return fallbackOutput(input);
 };
-  const normalizeParsedOutput = (output: AnalyzeCodeOutput): AnalyzeCodeOutput => ({
-    ...output,
-    completion: taskProfile.functionOnlyMode
-      ? normalizeFunctionOnlyCompletion(output.completion, taskProfile.targetFunctionName)
-      : sanitizeCompletion(output.completion),
-  });
