@@ -23,6 +23,7 @@ type TaskProfile = {
   codeSignals: string[];
   functionOnlyMode: boolean;
   targetFunctionName: string | null;
+  noCommentMode: boolean;
 };
 
 const DEFAULT_MAX_OUTPUT_TOKENS = 900;
@@ -204,6 +205,7 @@ const buildTaskProfile = ({ promptComment, currentCode, language }: AnalyzeCodeI
     /\bdon['’]?t\s+change\b/i.test(comment) ||
     /\bwithout\s+changing\b/i.test(comment);
   const targetFunctionName = extractTargetFunctionName(currentCode);
+  const noCommentMode = comment.length === 0;
 
   if (secondaryCategory && scores[secondaryCategory] > 0 && secondaryCategory !== primaryCategory) {
     codeSignals.push(`Secondary request signal detected: ${secondaryCategory}`);
@@ -218,6 +220,7 @@ const buildTaskProfile = ({ promptComment, currentCode, language }: AnalyzeCodeI
     codeSignals,
     functionOnlyMode,
     targetFunctionName,
+    noCommentMode,
   };
 };
 
@@ -228,6 +231,11 @@ const looksLikeStyleRewrite = (completion: string) =>
 
 const looksLikeCodeRequestRefusal = (completion: string) =>
   /\b(no code to complete|provide the code|paste the code|insufficient code|cannot proceed without code)\b/i.test(
+    completion,
+  );
+
+const looksLikeNoOpResponse = (completion: string) =>
+  /\b(no changes inferred|no changes needed|no modifications? (can be|were)? made|without further instructions|cannot accurately suggest)\b/i.test(
     completion,
   );
 
@@ -433,7 +441,7 @@ const parseOutput = (text: string): AnalyzeCodeOutput => {
     : 'Completion generated from comment prompt.';
 
   return {
-    completion: completion || text.trim(),
+    completion: completion.trim(),
     analysis: explanation || 'Completion generated from comment prompt.',
   };
 };
@@ -501,6 +509,9 @@ const analyzeWithGroq = async ({ promptComment, currentCode, language }: Analyze
     taskProfile.functionOnlyMode
       ? `Strict scope mode: function-only. Modify only ${taskProfile.targetFunctionName ?? 'the target function'} and nothing else.`
       : 'Strict scope mode: normal.',
+    taskProfile.noCommentMode
+      ? 'No comment prompt detected: infer likely issue(s) from code context and produce one minimal corrective patch.'
+      : 'Comment prompt detected: follow explicit instruction.',
   ].join('\n');
 
   const functionOnlyPrompt = taskProfile.functionOnlyMode
@@ -569,7 +580,7 @@ const analyzeWithGroq = async ({ promptComment, currentCode, language }: Analyze
   }
   const parsed = normalizeParsedOutput(parseOutput(outputText));
 
-  if (looksLikeCodeRequestRefusal(parsed.completion)) {
+  if (!parsed.completion || looksLikeCodeRequestRefusal(parsed.completion) || looksLikeNoOpResponse(parsed.analysis)) {
     const noRefusalPrompt = `${prompt}\nHard requirement: Never ask for more code; generate the best possible patch from given context.`;
     const retryResponse = await fetch('https://api.groq.com/openai/v1/responses', {
       method: 'POST',
@@ -578,6 +589,33 @@ const analyzeWithGroq = async ({ promptComment, currentCode, language }: Analyze
         Authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify(buildRequestBody(noRefusalPrompt)),
+    });
+
+    if (retryResponse.ok) {
+      const retryPayload = (await retryResponse.json()) as unknown;
+      const retryText = extractResponseText(retryPayload);
+      if (retryText) {
+        return normalizeParsedOutput(parseOutput(retryText));
+      }
+    }
+  }
+
+  if (taskProfile.noCommentMode && (!parsed.completion || looksLikeNoOpResponse(parsed.completion) || looksLikeNoOpResponse(parsed.analysis))) {
+    const noCommentFixPrompt = [
+      prompt,
+      'No-comment mode hard requirement:',
+      '- Do not return "no changes inferred" or equivalent.',
+      '- Infer one likely issue from current code context.',
+      '- Return a minimal concrete code patch only.',
+    ].join('\n');
+
+    const retryResponse = await fetch('https://api.groq.com/openai/v1/responses', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(buildRequestBody(noCommentFixPrompt)),
     });
 
     if (retryResponse.ok) {
