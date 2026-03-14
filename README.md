@@ -1,5 +1,7 @@
 # Exam Proctor Capture Prototype
 
+For full APK build steps on Fedora, see `BUILD.md`.
+
 This project is a Next.js + Chrome extension prototype for instructor-triggered capture.
 
 Flow implemented:
@@ -37,6 +39,72 @@ To test installability:
    - Service Worker is active
 4. Use "Install" from the browser menu.
 
+## Capacitor mobile app (Android/iOS)
+
+This project now includes Capacitor config at `capacitor.config.ts`.
+
+Current default is hosted mode using:
+- `https://proctor-phi.vercel.app`
+
+You can override with your own URL via `CAPACITOR_SERVER_URL`.
+
+### 1) Install dependencies
+
+```bash
+npm install
+```
+
+### 2) Add platforms (first time)
+
+```bash
+npm run cap:add:android
+npm run cap:add:ios
+```
+
+### 3) Sync with your current hosted URL
+
+```bash
+CAPACITOR_SERVER_URL=https://proctor-phi.vercel.app npm run cap:sync
+```
+
+### 4) Open native projects
+
+```bash
+npm run cap:open:android
+# or
+npm run cap:open:ios
+```
+
+### 5) Build APK (Android)
+
+Debug APK:
+
+```bash
+cd android
+./gradlew assembleDebug
+```
+
+Output:
+- `android/app/build/outputs/apk/debug/app-debug.apk`
+
+Release APK:
+
+```bash
+cd android
+./gradlew assembleRelease
+```
+
+Output:
+- `android/app/build/outputs/apk/release/app-release.apk`
+
+If release build requires signing setup, generate a signed APK from Android Studio:
+- `Build` -> `Generate Signed Bundle / APK` -> `APK`
+
+Note:
+- For production devices, use HTTPS URLs.
+- For local testing, you can set:
+  - `CAPACITOR_SERVER_URL=http://192.168.x.x:3000`
+
 ## API Endpoints
 
 - `POST /api/proctor/auth/login` -> login with username/password
@@ -44,6 +112,7 @@ To test installability:
 - `POST /api/proctor/command` -> queue `capture_now`
 - `GET /api/proctor/command/pull` -> extension pulls next command
 - `POST /api/proctor/capture` -> extension uploads capture image data URL
+- `POST /api/proctor/code/complete` -> VS Code extension submits comment/code and gets AI completion
 
 Note: queue and captures are stored in memory (`lib/proctor-global-store.ts`) and reset when server restarts.
 
@@ -61,6 +130,14 @@ Then:
 4. Click **Start Background** in the extension popup.
 6. Go to the tab you want to monitor.
 7. Back in Next.js UI, click **Capture Now**.
+
+## Load the VS Code extension
+
+1. Open VS Code.
+2. Run: `Developer: Install Extension from Location...`
+3. Select folder: `vscode-extension/`
+4. Run command: `Proctor AI: Configure Server`
+5. In code, place cursor on a comment line and run: `Proctor AI: Complete From Comment`
 
 ## AI analysis options
 

@@ -17,6 +17,7 @@ const getConfig = async () => {
     'password',
     'authToken',
     'pollingEnabled',
+    'autoStopAfterCapture',
   ]);
 
   return {
@@ -25,6 +26,7 @@ const getConfig = async () => {
     password: data.password || '',
     authToken: data.authToken || '',
     pollingEnabled: Boolean(data.pollingEnabled),
+    autoStopAfterCapture: data.autoStopAfterCapture !== false,
   };
 };
 
@@ -203,6 +205,14 @@ const pollOnce = async () => {
         await setStatus('Capture command received. Capturing current tab...');
         const imageDataUrl = await captureCurrentTab();
         await uploadCapture({ config, imageDataUrl });
+        if (config.autoStopAfterCapture) {
+          await chrome.storage.local.set({
+            pollingEnabled: false,
+            lastStatus: `[${new Date().toLocaleTimeString()}] Captured and uploaded. Auto-stopped to avoid continuous updates.`,
+          });
+          return;
+        }
+
         await setStatus('Current tab captured and uploaded.');
       } catch (error) {
         const reason = error instanceof Error ? error.message : 'Unknown capture error.';

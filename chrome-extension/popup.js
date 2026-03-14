@@ -2,6 +2,7 @@ const statusEl = document.getElementById('status');
 const apiBaseEl = document.getElementById('apiBase');
 const usernameEl = document.getElementById('username');
 const passwordEl = document.getElementById('password');
+const autoStopAfterCaptureEl = document.getElementById('autoStopAfterCapture');
 const saveConfigBtn = document.getElementById('saveConfig');
 const startAgentBtn = document.getElementById('startAgent');
 const stopAgentBtn = document.getElementById('stopAgent');
@@ -19,8 +20,9 @@ const getFormValues = () => {
   const apiBase = apiBaseEl.value.trim().replace(/\/$/, '');
   const username = usernameEl.value.trim();
   const password = passwordEl.value;
+  const autoStopAfterCapture = Boolean(autoStopAfterCaptureEl.checked);
 
-  return { apiBase, username, password };
+  return { apiBase, username, password, autoStopAfterCapture };
 };
 
 const validateRequiredValues = ({ apiBase, username, password }) => {
@@ -29,15 +31,17 @@ const validateRequiredValues = ({ apiBase, username, password }) => {
   }
 };
 
+
 const persistForm = async () => {
   await chrome.storage.local.set(getFormValues());
 };
 
 const loadSettings = async () => {
-  const { apiBase, username, password, pollingEnabled, lastStatus } = await chrome.storage.local.get([
+  const { apiBase, username, password, autoStopAfterCapture, pollingEnabled, lastStatus } = await chrome.storage.local.get([
     'apiBase',
     'username',
     'password',
+    'autoStopAfterCapture',
     'pollingEnabled',
     'lastStatus',
   ]);
@@ -45,6 +49,7 @@ const loadSettings = async () => {
   apiBaseEl.value = apiBase || 'http://localhost:3000';
   usernameEl.value = username || 'proctor';
   passwordEl.value = password || 'proctor123';
+  autoStopAfterCaptureEl.checked = autoStopAfterCapture !== false;
 
   updateButtons(Boolean(pollingEnabled));
   setStatus(lastStatus || 'Set config, then click Start Background.');
@@ -111,6 +116,12 @@ stopAgentBtn.addEventListener('click', async () => {
     persistForm().catch(() => {
       setStatus('Could not auto-save config.');
     });
+  });
+});
+
+autoStopAfterCaptureEl.addEventListener('change', () => {
+  persistForm().catch(() => {
+    setStatus('Could not auto-save config.');
   });
 });
 

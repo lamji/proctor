@@ -1,9 +1,10 @@
 import crypto from "node:crypto";
 
 import { analyzeCaptureImage } from "@/lib/ai-analyzer";
+import { analyzeCodeFromComment } from "@/lib/ai-code-analyzer";
 
 export type CommandType = "capture_now";
-export type CaptureSource = "screen" | "tab" | "window";
+export type CaptureSource = "screen" | "tab" | "window" | "vscode";
 
 export type ProctorCommand = {
   id: string;
@@ -13,10 +14,13 @@ export type ProctorCommand = {
 
 export type CaptureRecord = {
   id: string;
-  imageDataUrl: string;
+  imageDataUrl: string | null;
   createdAt: string;
   source: CaptureSource;
   analysis: string;
+  promptComment?: string;
+  submittedCode?: string;
+  completion?: string;
 };
 
 type GlobalProctorState = {
@@ -25,10 +29,16 @@ type GlobalProctorState = {
 };
 
 const MAX_CAPTURES = 20;
-const globalState: GlobalProctorState = {
-  commands: [],
-  captures: [],
+const globalForProctor = globalThis as typeof globalThis & {
+  __PROCTOR_GLOBAL_STATE__?: GlobalProctorState;
 };
+
+const globalState: GlobalProctorState =
+  globalForProctor.__PROCTOR_GLOBAL_STATE__ ??
+  (globalForProctor.__PROCTOR_GLOBAL_STATE__ = {
+    commands: [],
+    captures: [],
+  });
 
 const makeIsoNow = () => new Date().toISOString();
 
@@ -83,6 +93,38 @@ export const addGlobalCaptureWithAnalysis = async ({
 
   globalState.captures.unshift(capture);
   globalState.captures = globalState.captures.slice(0, MAX_CAPTURES);
+
+  return capture;
+};
+
+export const addGlobalCodeCompletionWithAnalysis = async ({
+  promptComment,
+  currentCode,
+  language,
+}: {
+  promptComment: string;
+  currentCode: string;
+  language?: string;
+}) => {
+  const output = await analyzeCodeFromComment({
+    promptComment,
+    currentCode,
+    language,
+  });
+
+  const capture: CaptureRecord = {
+    id: crypto.randomUUID(),
+    imageDataUrl: null,
+    source: "vscode",
+    createdAt: makeIsoNow(),
+    analysis: output.analysis,
+    promptComment,
+    submittedCode: currentCode,
+    completion: output.completion,
+  };
+
+  // VS Code flow is latest-only by request: replace previous results on each new submission.
+  globalState.captures = [capture];
 
   return capture;
 };

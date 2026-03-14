@@ -2,13 +2,17 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { AnalysisOutput } from '@/components/AnalysisOutput';
+import { apiUrl, getApiBase } from '@/lib/api-client';
 
 type CaptureRecord = {
   id: string;
-  imageDataUrl: string;
+  imageDataUrl: string | null;
   createdAt: string;
-  source: 'screen' | 'tab' | 'window';
+  source: 'screen' | 'tab' | 'window' | 'vscode';
   analysis: string;
+  promptComment?: string;
+  submittedCode?: string;
+  completion?: string;
 };
 
 type ProctorState = {
@@ -43,6 +47,7 @@ export default function Page() {
 
   const [message, setMessage] = useState<string>('Login first, then send capture command.');
   const [loading, setLoading] = useState(false);
+  const apiBase = getApiBase();
 
   const getAuthHeaders = useCallback(() => {
     if (!authToken) {
@@ -59,7 +64,7 @@ export default function Page() {
       return;
     }
 
-    const response = await fetch('/api/proctor/state', {
+    const response = await fetch(apiUrl('/api/proctor/state'), {
       cache: 'no-store',
       headers: getAuthHeaders(),
     });
@@ -75,7 +80,7 @@ export default function Page() {
 
   const clearCapturedResponses = useCallback(
     async ({ notify = true }: { notify?: boolean } = {}) => {
-      const response = await fetch('/api/proctor/state', {
+      const response = await fetch(apiUrl('/api/proctor/state'), {
         method: 'DELETE',
         headers: getAuthHeaders(),
       });
@@ -115,7 +120,7 @@ export default function Page() {
     setLoading(true);
 
     try {
-      const response = await fetch('/api/proctor/auth/login', {
+      const response = await fetch(apiUrl('/api/proctor/auth/login'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -132,7 +137,7 @@ export default function Page() {
       setAuthToken(data.token);
       setMessage('Login successful. Capture controls are ready.');
 
-      const stateResponse = await fetch('/api/proctor/state', {
+      const stateResponse = await fetch(apiUrl('/api/proctor/state'), {
         cache: 'no-store',
         headers: {
           Authorization: `Bearer ${data.token}`,
@@ -157,7 +162,7 @@ export default function Page() {
     try {
       await clearCapturedResponses({ notify: false });
 
-      const response = await fetch('/api/proctor/command', {
+      const response = await fetch(apiUrl('/api/proctor/command'), {
         method: 'POST',
         headers: {
           ...getAuthHeaders(),
@@ -201,9 +206,9 @@ export default function Page() {
           <p className="text-xs font-medium uppercase tracking-[0.12em] text-sky-600">Exam Proctor</p>
           <h1 className="mt-1 text-2xl font-bold leading-tight text-slate-900">Capture Control</h1>
           <p className="mt-2 text-sm leading-relaxed text-slate-600">
-            Login, then send <code>capture_now</code> to the extension and inspect AI output.
+            Login, then send <code>capture_now</code> or VS Code completion requests and inspect AI output.
           </p>
-
+          {/* Add bg-red to main wrapper */}
           <div className="mt-3 flex flex-wrap items-center gap-2">
             <span className="rounded-full bg-sky-100 px-3 py-1 text-xs font-medium text-sky-700">
               Pending: {state.pendingCommands}
@@ -213,7 +218,7 @@ export default function Page() {
             </span>
           </div>
         </header>
-
+         
         <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
           <h2 className="text-base font-semibold text-slate-900">Credentials</h2>
           <div className="mt-3 space-y-3">
@@ -299,7 +304,15 @@ export default function Page() {
           <h2 className="text-base font-semibold text-slate-900">Extension Setup</h2>
           <ul className="mt-2 space-y-1.5 text-sm text-slate-600">
             <li>
-              API Base: <code>http://localhost:3000</code>
+              API Target: <code>{apiBase}</code>
+            </li>
+            <li>
+              Default by environment:{' '}
+              <code>
+                {process.env.NODE_ENV === 'development'
+                  ? 'http://localhost:3000'
+                  : 'https://proctor-phi.vercel.app'}
+              </code>
             </li>
             <li>
               Username: <code>{username || '(enter username)'}</code>
@@ -308,25 +321,47 @@ export default function Page() {
           </ul>
         </section>
 
-        <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+        <section className="rounded-2xl border border-slate-200 bg-white p-4">
           <h2 className="text-base font-semibold text-slate-900">Captured Frames ({state.captures.length})</h2>
           {!state.captures.length ? (
             <div className="mt-3 rounded-xl border border-dashed border-slate-300 bg-slate-50 px-3 py-4 text-sm text-slate-600">
               No captures yet. Start extension background mode and tap <strong>Capture Now</strong>.
             </div>
           ) : (
-            <div className="mt-3 space-y-4">
+            <div className="mt-3 space-y-0">
               {state.captures.map((capture) => (
                 <article
                   key={capture.id}
-                  className="w-full min-w-0 rounded-xl border border-slate-200 bg-white p-3 shadow-sm"
+                  className="w-full min-w-0 rounded-xl bg-white p-0"
                 >
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={capture.imageDataUrl}
-                    alt={`Capture ${capture.id}`}
-                    className="h-auto w-full rounded-lg border border-slate-200"
-                  />
+                  {capture.imageDataUrl ? (
+                    <>
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={capture.imageDataUrl}
+                        alt={`Capture ${capture.id}`}
+                        className="h-auto w-full rounded-lg border border-slate-200"
+                      />
+                    </>
+                  ) : (
+                    <div className="space-y-2 rounded-lg border border-slate-200 bg-slate-50 p-3">
+                      {capture.promptComment ? (
+                        <p className="text-xs text-slate-700">
+                          <strong>Prompt Comment:</strong> {capture.promptComment}
+                        </p>
+                      ) : null}
+                      {capture.submittedCode ? (
+                        <pre className="whitespace-pre-wrap break-words rounded-md bg-slate-900 p-2 text-[11px] text-slate-100">
+                          <code>{capture.submittedCode}</code>
+                        </pre>
+                      ) : null}
+                      {capture.completion ? (
+                        <pre className="whitespace-pre-wrap break-words rounded-md bg-emerald-950 p-2 text-[11px] text-emerald-100">
+                          <code>{capture.completion}</code>
+                        </pre>
+                      ) : null}
+                    </div>
+                  )}
                   <p className="mt-2 text-xs text-slate-500">{capture.createdAt}</p>
                   <p className="text-xs text-slate-500">Source: {capture.source}</p>
                   <AnalysisOutput text={capture.analysis} />
