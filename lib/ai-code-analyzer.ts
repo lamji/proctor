@@ -13,6 +13,7 @@ type AnalyzeCodeOutput = {
 
 type IntentMode = 'style' | 'behavior' | 'mixed';
 type InstructionCategory = 'behavior' | 'style' | 'refactor' | 'tests' | 'docs';
+type InstructionMode = 'none' | 'todo_flow' | 'jsx_tailwind' | 'general';
 
 type TaskProfile = {
   intentMode: IntentMode;
@@ -24,6 +25,28 @@ type TaskProfile = {
   functionOnlyMode: boolean;
   targetFunctionName: string | null;
   noCommentMode: boolean;
+};
+
+const detectInstructionMode = (promptComment: string): InstructionMode => {
+  const comment = promptComment.trim();
+  if (!comment) {
+    return 'none';
+  }
+
+  if (/\b(todo|flow|steps?|instruction)\b/i.test(comment)) {
+    return 'todo_flow';
+  }
+
+  const jsxTailwindSignal =
+    /\b(div|section|header|footer|main|nav|aside|article|button|input|label|form|ul|li|span|flex|grid|gap|justify|items|space[- ]between|rounded|p-\d|m-\d|bg-|text-)\b/i.test(
+      comment,
+    );
+  const behaviorSignal = /\b(function|api|state|handler|fetch|loop|condition|algorithm|test)\b/i.test(comment);
+  if (jsxTailwindSignal && !behaviorSignal) {
+    return 'jsx_tailwind';
+  }
+
+  return 'general';
 };
 
 const DEFAULT_MAX_OUTPUT_TOKENS = 900;
@@ -458,6 +481,7 @@ const analyzeWithGroq = async ({ promptComment, currentCode, language }: Analyze
   const taskProfile = buildTaskProfile({ promptComment, currentCode, language });
   const { intentMode } = taskProfile;
   const isStyleFixMode = intentMode === 'style' || taskProfile.noCommentMode;
+  const instructionMode = detectInstructionMode(promptComment);
 
   const basePrompt = [
     'You are a coding completion assistant.',
@@ -471,7 +495,17 @@ const analyzeWithGroq = async ({ promptComment, currentCode, language }: Analyze
     '<short reason in <= 80 words>',
     'Do not wrap completion in markdown fences.',
     'Do not ask the developer to paste code; the provided context is sufficient.',
+    'Current Code Context includes the entire file. Use it fully before deciding output.',
   ].join(' ');
+
+  const workflowModePrompt = [
+    'Strict workflow policy:',
+    '- Rule 1: If Comment Prompt is present, treat it as explicit instruction and implement it using the full file context.',
+    '- Rule 2: If instruction is JSX/Tailwind shorthand (for example "div flex, space between"), generate JSX using valid Tailwind classes.',
+    '- Rule 3: If Comment Prompt is empty, treat this as CSS/Tailwind error-fix mode and repair invalid or unknown classes in scope.',
+    '- Never return "no changes inferred" in Rule 3.',
+    '- Never rely on single hardcoded replacements; inspect all relevant class/style tokens in scope.',
+  ].join('\n');
 
   const behaviorPrompt = [
     'Intent mode: BEHAVIOR.',
@@ -492,6 +526,30 @@ const analyzeWithGroq = async ({ promptComment, currentCode, language }: Analyze
     'Handle both logic and style only where comment explicitly requests both.',
     'Prioritize logic correctness before visual refinements.',
   ].join(' ');
+
+  const instructionModePrompt =
+    instructionMode === 'todo_flow'
+      ? [
+          'Instruction subtype: TODO/FLOW.',
+          'Interpret the comment as implementation steps and produce a concrete code patch that follows those steps.',
+          'Do not ignore numbered or flow-like directives in comments.',
+        ].join(' ')
+      : instructionMode === 'jsx_tailwind'
+        ? [
+            'Instruction subtype: JSX_TAILWIND.',
+            'Generate JSX/code using valid Tailwind utilities.',
+            'Map shorthand intent to valid utility classes (for example "space between" -> "justify-between").',
+            'Remove or correct invalid utility tokens instead of preserving them.',
+          ].join(' ')
+        : instructionMode === 'none'
+          ? [
+              'Instruction subtype: NONE.',
+              'No instruction comment was provided; default to fixing CSS/Tailwind class issues from context.',
+            ].join(' ')
+          : [
+              'Instruction subtype: GENERAL.',
+              'Treat comment text as the authoritative implementation instruction.',
+            ].join(' ');
 
   const dynamicProfilePrompt = [
     `Primary category: ${taskProfile.primaryCategory}.`,
@@ -528,10 +586,10 @@ const analyzeWithGroq = async ({ promptComment, currentCode, language }: Analyze
 
   const prompt =
     intentMode === 'style'
-      ? `${basePrompt} ${styleFixPrompt}\n${dynamicProfilePrompt}\n${functionOnlyPrompt}`
+      ? `${basePrompt} ${styleFixPrompt}\n${workflowModePrompt}\n${instructionModePrompt}\n${dynamicProfilePrompt}\n${functionOnlyPrompt}`
       : intentMode === 'mixed'
-        ? `${basePrompt} ${mixedPrompt}\n${dynamicProfilePrompt}\n${functionOnlyPrompt}`
-        : `${basePrompt} ${behaviorPrompt}\n${dynamicProfilePrompt}\n${functionOnlyPrompt}`;
+        ? `${basePrompt} ${mixedPrompt}\n${workflowModePrompt}\n${instructionModePrompt}\n${dynamicProfilePrompt}\n${functionOnlyPrompt}`
+        : `${basePrompt} ${behaviorPrompt}\n${workflowModePrompt}\n${instructionModePrompt}\n${dynamicProfilePrompt}\n${functionOnlyPrompt}`;
 
   const contextualKnowledge = isStyleFixMode ? `\n\n${tailwindDocsKnowledge}` : '';
 
@@ -546,7 +604,7 @@ const analyzeWithGroq = async ({ promptComment, currentCode, language }: Analyze
         content: [
           {
             type: 'input_text',
-            text: `${activePrompt}${contextualKnowledge}\n\nLanguage: ${language || 'unknown'}\nInferred Intent Mode: ${intentMode}\nComment Prompt: ${promptComment || '(none)'}\n\nCurrent Code Context:\n${currentCode}`,
+            text: `${activePrompt}${contextualKnowledge}\n\nLanguage: ${language || 'unknown'}\nInferred Intent Mode: ${intentMode}\nInstruction Mode: ${instructionMode}\nComment Prompt: ${promptComment || '(none)'}\n\nCurrent Code Context:\n${currentCode}`,
           },
         ],
       },

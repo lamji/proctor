@@ -79,6 +79,12 @@ const getInlineCommentText = (line) => {
     return '';
   }
 
+  // JSX comment form: {/* instruction */}
+  const jsxCommentMatch = trimmed.match(/^\{\s*\/\*\s*(.+?)\s*\*\/\s*\}$/);
+  if (jsxCommentMatch?.[1]) {
+    return jsxCommentMatch[1].trim();
+  }
+
   const lineCommentMatch = trimmed.match(/^(?:\/\/|#)\s*(.+)$/);
   if (lineCommentMatch?.[1]) {
     return lineCommentMatch[1].trim();
@@ -152,37 +158,24 @@ const extractPromptComment = (editor, selection, selectedCode) => {
   return '';
 };
 
-const looksLikeCode = (text) =>
-  /(import\s|export\s|const\s|let\s|var\s|function\s|class\s|=>|return\s|if\s*\(|for\s*\(|while\s*\(|\{|\}|;)/.test(
-    text,
-  );
-
-const buildCurrentCodeContext = (editor, selection, selectedCode) => {
+const buildCurrentCodeContext = (editor, selection, selectedCode, promptComment) => {
   const document = editor.document;
-  const contextStart = Math.max(0, selection.start.line - 60);
-  const contextEnd = Math.min(document.lineCount - 1, selection.end.line + 60);
-  const contextRange = new vscode.Range(
-    contextStart,
-    0,
-    contextEnd,
-    document.lineAt(contextEnd).text.length,
-  );
-  const nearbyContext = document.getText(contextRange).trim();
-
-  const selectedLooksLikeCode = looksLikeCode(selectedCode);
-  if (selectedLooksLikeCode) {
-    return selectedCode;
-  }
+  const fullFileContext = document.getText();
+  const hasInstruction = Boolean(promptComment && promptComment.trim().length > 0);
 
   return [
     `File Path: ${document.fileName}`,
     `Language: ${document.languageId}`,
     `Selection Lines: ${selection.start.line + 1}-${selection.end.line + 1}`,
+    `Instruction Present: ${hasInstruction ? 'yes' : 'no'}`,
+    'Instruction:',
+    hasInstruction ? promptComment : '(none)',
+    '',
     'Selected Snippet:',
     selectedCode || '(empty selection)',
     '',
-    'Nearby File Context:',
-    nearbyContext,
+    'Entire File Context:',
+    fullFileContext || '(empty file)',
   ].join('\n');
 };
 
@@ -277,7 +270,12 @@ const sendSelectionToServer = async (context) => {
     throw new Error('Selected code is empty.');
   }
   const promptComment = extractPromptComment(editor, selection, selectedCode);
-  const currentCodeContext = buildCurrentCodeContext(editor, selection, selectedCode);
+  const currentCodeContext = buildCurrentCodeContext(
+    editor,
+    selection,
+    selectedCode,
+    promptComment,
+  );
 
   const doRequest = async (token) =>
     requestJson({
