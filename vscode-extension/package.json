@@ -2,7 +2,7 @@
   "name": "proctor-ai-vscode-agent",
   "displayName": "Proctor AI VSCode Agent",
   "description": "Reads comment intent, requests code completion from your Next.js server, inserts result, and logs it in proctor dashboard.",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "publisher": "local",
   "engines": {
     "vscode": "^1.85.0"
