@@ -42,7 +42,7 @@ const analyzeWithAnthropic = async ({ imageDataUrl, source }: AnalyzeCaptureInpu
     return null;
   }
 
-  const model = process.env.ANTHROPIC_VISION_MODEL ?? "claude-3-5-haiku-20241022";
+  const model = process.env.ANTHROPIC_VISION_MODEL ?? "claude-haiku-4-5-20251001";
   const mode = process.env.PROCTOR_AI_MODE ?? "proctor";
 
   const defaultProctorPrompt = [
