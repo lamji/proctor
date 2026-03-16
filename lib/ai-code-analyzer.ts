@@ -66,25 +66,16 @@ const extractResponseText = (payload: unknown) => {
   }
 
   const root = payload as {
-    output_text?: string;
-    output?: Array<{ content?: Array<{ type?: string; text?: string }> }>;
+    content?: Array<{ type?: string; text?: string }>;
   };
 
-  if (typeof root.output_text === 'string' && root.output_text.trim().length > 0) {
-    return root.output_text.trim();
-  }
+  const text = root.content
+    ?.filter((block) => block?.type === 'text' && typeof block.text === 'string')
+    .map((block) => block.text?.trim())
+    .filter((t): t is string => Boolean(t))
+    .join('\n\n');
 
-  const chunks = root.output
-    ?.flatMap((item) => item.content ?? [])
-    .filter((content) => content?.type === 'output_text' && typeof content.text === 'string')
-    .map((content) => content.text?.trim())
-    .filter((text): text is string => Boolean(text));
-
-  if (!chunks?.length) {
-    return null;
-  }
-
-  return chunks.join('\n\n');
+  return text || null;
 };
 
 const tailwindDocsKnowledge = [
@@ -470,13 +461,13 @@ const parseOutput = (text: string): AnalyzeCodeOutput => {
   };
 };
 
-const analyzeWithGroq = async ({ promptComment, currentCode, language }: AnalyzeCodeInput) => {
-  const apiKey = process.env.GROQ_API_KEY;
+const analyzeWithAnthropic = async ({ promptComment, currentCode, language }: AnalyzeCodeInput) => {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
     return null;
   }
 
-  const model = process.env.GROQ_CODE_MODEL ?? process.env.GROQ_VISION_MODEL ?? 'meta-llama/llama-4-scout-17b-16e-instruct';
+  const model = process.env.ANTHROPIC_CODE_MODEL ?? process.env.ANTHROPIC_VISION_MODEL ?? 'claude-3-5-haiku-20241022';
 
   const taskProfile = buildTaskProfile({ promptComment, currentCode, language });
   const { intentMode } = taskProfile;
@@ -595,18 +586,14 @@ const analyzeWithGroq = async ({ promptComment, currentCode, language }: Analyze
 
   const buildRequestBody = (activePrompt: string) => ({
     model,
-    max_output_tokens: resolveMaxOutputTokens(),
+    max_tokens: resolveMaxOutputTokens(),
     temperature: 0.1,
     top_p: 0.9,
-    input: [
+    system: activePrompt + contextualKnowledge,
+    messages: [
       {
         role: 'user',
-        content: [
-          {
-            type: 'input_text',
-            text: `${activePrompt}${contextualKnowledge}\n\nLanguage: ${language || 'unknown'}\nInferred Intent Mode: ${intentMode}\nInstruction Mode: ${instructionMode}\nComment Prompt: ${promptComment || '(none)'}\n\nCurrent Code Context:\n${currentCode}`,
-          },
-        ],
+        content: `Language: ${language || 'unknown'}\nInferred Intent Mode: ${intentMode}\nInstruction Mode: ${instructionMode}\nComment Prompt: ${promptComment || '(none)'}\n\nCurrent Code Context:\n${currentCode}`,
       },
     ],
   });
@@ -618,18 +605,19 @@ const analyzeWithGroq = async ({ promptComment, currentCode, language }: Analyze
       : sanitizeCompletion(output.completion),
   });
 
-  const response = await fetch('https://api.groq.com/openai/v1/responses', {
+  const response = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
     },
     body: JSON.stringify(buildRequestBody(prompt)),
   });
 
   if (!response.ok) {
     const details = await response.text();
-    throw new Error(`Groq code analysis failed (${response.status}): ${details}`);
+    throw new Error(`Anthropic code analysis failed (${response.status}): ${details}`);
   }
 
   const payload = (await response.json()) as unknown;
@@ -641,11 +629,12 @@ const analyzeWithGroq = async ({ promptComment, currentCode, language }: Analyze
 
   if (!parsed.completion || looksLikeCodeRequestRefusal(parsed.completion) || looksLikeNoOpResponse(parsed.analysis)) {
     const noRefusalPrompt = `${prompt}\nHard requirement: Never ask for more code; generate the best possible patch from given context.`;
-    const retryResponse = await fetch('https://api.groq.com/openai/v1/responses', {
+    const retryResponse = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify(buildRequestBody(noRefusalPrompt)),
     });
@@ -669,11 +658,12 @@ const analyzeWithGroq = async ({ promptComment, currentCode, language }: Analyze
       '- Return a minimal concrete code patch only.',
     ].join('\n');
 
-    const retryResponse = await fetch('https://api.groq.com/openai/v1/responses', {
+    const retryResponse = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify(buildRequestBody(noCommentFixPrompt)),
     });
@@ -689,11 +679,12 @@ const analyzeWithGroq = async ({ promptComment, currentCode, language }: Analyze
 
   if (intentMode === 'behavior' && looksLikeStyleRewrite(parsed.completion)) {
     const strictBehaviorPrompt = `${basePrompt} ${behaviorPrompt} Never modify className, style props, UI library imports, or visual classes for behavior-only tasks.`;
-    const retryResponse = await fetch('https://api.groq.com/openai/v1/responses', {
+    const retryResponse = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify(buildRequestBody(strictBehaviorPrompt)),
     });
@@ -720,11 +711,12 @@ const analyzeWithGroq = async ({ promptComment, currentCode, language }: Analyze
       ...qualityIssues.map((issue) => `- ${issue}`),
     ].join('\n');
 
-    const repairResponse = await fetch('https://api.groq.com/openai/v1/responses', {
+    const repairResponse = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify(buildRequestBody(repairPrompt)),
     });
@@ -757,11 +749,12 @@ const analyzeWithGroq = async ({ promptComment, currentCode, language }: Analyze
         ...scopeViolations.map((violation) => `- ${violation}`),
       ].join('\n');
 
-      const scopeRepairResponse = await fetch('https://api.groq.com/openai/v1/responses', {
+      const scopeRepairResponse = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`,
+          'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
         },
         body: JSON.stringify(buildRequestBody(scopeRepairPrompt)),
       });
@@ -795,21 +788,21 @@ const analyzeWithGroq = async ({ promptComment, currentCode, language }: Analyze
 
 const fallbackOutput = ({ promptComment }: AnalyzeCodeInput): AnalyzeCodeOutput => ({
   completion: `// AI fallback: implement requested behavior for: ${promptComment}`,
-  analysis: 'No AI provider configured. Set GROQ_API_KEY to generate real code completions.',
+  analysis: 'No AI provider configured. Set ANTHROPIC_API_KEY to generate real code completions.',
 });
 
 export const analyzeCodeFromComment = async (input: AnalyzeCodeInput): Promise<AnalyzeCodeOutput> => {
   const startedAt = Date.now();
 
   try {
-    const groqOutput = await analyzeWithGroq(input);
-    if (groqOutput) {
+    const anthropicOutput = await analyzeWithAnthropic(input);
+    if (anthropicOutput) {
       logProctorEvent('info', 'ai_code_completion_complete', {
-        provider: 'groq',
-        outputChars: groqOutput.completion.length,
+        provider: 'anthropic',
+        outputChars: anthropicOutput.completion.length,
         processingMs: Date.now() - startedAt,
       });
-      return groqOutput;
+      return anthropicOutput;
     }
   } catch (error) {
     const reason = error instanceof Error ? error.message : 'Unknown AI code analysis error.';

@@ -24,34 +24,25 @@ const extractResponseText = (payload: unknown) => {
   }
 
   const root = payload as {
-    output_text?: string;
-    output?: Array<{ content?: Array<{ type?: string; text?: string }> }>;
+    content?: Array<{ type?: string; text?: string }>;
   };
 
-  if (typeof root.output_text === "string" && root.output_text.trim().length > 0) {
-    return root.output_text.trim();
-  }
+  const text = root.content
+    ?.filter((block) => block?.type === "text" && typeof block.text === "string")
+    .map((block) => block.text?.trim())
+    .filter((t): t is string => Boolean(t))
+    .join("\n\n");
 
-  const chunks = root.output
-    ?.flatMap((item) => item.content ?? [])
-    .filter((content) => content?.type === "output_text" && typeof content.text === "string")
-    .map((content) => content.text?.trim())
-    .filter((text): text is string => Boolean(text));
-
-  if (!chunks?.length) {
-    return null;
-  }
-
-  return chunks.join("\n\n");
+  return text || null;
 };
 
-const analyzeWithGroq = async ({ imageDataUrl, source }: AnalyzeCaptureInput) => {
-  const apiKey = process.env.GROQ_API_KEY;
+const analyzeWithAnthropic = async ({ imageDataUrl, source }: AnalyzeCaptureInput) => {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
     return null;
   }
 
-  const model = process.env.GROQ_VISION_MODEL ?? "meta-llama/llama-4-scout-17b-16e-instruct";
+  const model = process.env.ANTHROPIC_VISION_MODEL ?? "claude-3-5-haiku-20241022";
   const mode = process.env.PROCTOR_AI_MODE ?? "proctor";
 
   const defaultProctorPrompt = [
@@ -101,21 +92,27 @@ const analyzeWithGroq = async ({ imageDataUrl, source }: AnalyzeCaptureInput) =>
     mode === "solve_test" && shouldIncludeTechKnowledge() ? getTechKnowledgeContext() : "";
   const promptWithKnowledge = techKnowledgeContext ? `${prompt}\n\n${techKnowledgeContext}` : prompt;
 
-  const response = await fetch("https://api.groq.com/openai/v1/responses", {
+  const dataUrlMatch = imageDataUrl.match(/^data:([^;]+);base64,(.+)$/);
+  const mediaType = (dataUrlMatch?.[1] ?? "image/png") as "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+  const imageData = dataUrlMatch?.[2] ?? imageDataUrl;
+
+  const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
     },
     body: JSON.stringify({
       model,
-      max_output_tokens: resolveMaxOutputTokens(),
-      input: [
+      max_tokens: resolveMaxOutputTokens(),
+      system: promptWithKnowledge,
+      messages: [
         {
           role: "user",
           content: [
-            { type: "input_text", text: `${promptWithKnowledge} Capture source: ${source}.` },
-            { type: "input_image", image_url: imageDataUrl },
+            { type: "text", text: `Capture source: ${source}.` },
+            { type: "image", source: { type: "base64", media_type: mediaType, data: imageData } },
           ],
         },
       ],
@@ -124,7 +121,7 @@ const analyzeWithGroq = async ({ imageDataUrl, source }: AnalyzeCaptureInput) =>
 
   if (!response.ok) {
     const details = await response.text();
-    throw new Error(`Groq analysis failed (${response.status}): ${details}`);
+    throw new Error(`Anthropic analysis failed (${response.status}): ${details}`);
   }
 
   const payload = (await response.json()) as unknown;
@@ -168,7 +165,7 @@ const fallbackAnalysis = ({ imageDataUrl, source }: AnalyzeCaptureInput) => {
   return [
     `Capture received from ${source}.`,
     `Approx encoded size: ${kbEstimate} KB.`,
-    "No AI provider configured. Set GROQ_API_KEY or AI_ANALYSIS_ENDPOINT.",
+    "No AI provider configured. Set ANTHROPIC_API_KEY or AI_ANALYSIS_ENDPOINT.",
   ].join(" ");
 };
 
@@ -176,15 +173,15 @@ export const analyzeCaptureImage = async (input: AnalyzeCaptureInput) => {
   const startedAt = Date.now();
 
   try {
-    const groqOutput = await analyzeWithGroq(input);
-    if (groqOutput) {
+    const anthropicOutput = await analyzeWithAnthropic(input);
+    if (anthropicOutput) {
       logProctorEvent("info", "ai_analysis_complete", {
-        provider: "groq",
+        provider: "anthropic",
         source: input.source,
-        outputChars: groqOutput.length,
+        outputChars: anthropicOutput.length,
         processingMs: Date.now() - startedAt,
       });
-      return groqOutput;
+      return anthropicOutput;
     }
 
     const webhookOutput = await analyzeWithWebhook(input);
