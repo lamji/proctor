@@ -49,7 +49,7 @@ const detectInstructionMode = (promptComment: string): InstructionMode => {
   return 'general';
 };
 
-const DEFAULT_MAX_OUTPUT_TOKENS = 900;
+const DEFAULT_MAX_OUTPUT_TOKENS = 8000;
 
 const resolveMaxOutputTokens = () => {
   const rawMaxTokens = Number.parseInt(process.env.PROCTOR_AI_MAX_OUTPUT_TOKENS ?? '', 10);
@@ -57,7 +57,7 @@ const resolveMaxOutputTokens = () => {
     return DEFAULT_MAX_OUTPUT_TOKENS;
   }
 
-  return Math.min(rawMaxTokens, 4000);
+  return Math.min(rawMaxTokens, 16000);
 };
 
 const extractResponseText = (payload: unknown) => {
@@ -587,8 +587,7 @@ const analyzeWithAnthropic = async ({ promptComment, currentCode, language }: An
   const buildRequestBody = (activePrompt: string) => ({
     model,
     max_tokens: resolveMaxOutputTokens(),
-    temperature: 0.1,
-    top_p: 0.9,
+    thinking: { type: "enabled", budget_tokens: 5000 },
     system: activePrompt + contextualKnowledge,
     messages: [
       {

@@ -7,7 +7,7 @@ type AnalyzeCaptureInput = {
   source: CaptureSource;
 };
 
-const DEFAULT_MAX_OUTPUT_TOKENS = 900;
+const DEFAULT_MAX_OUTPUT_TOKENS = 10000;
 
 const resolveMaxOutputTokens = () => {
   const rawMaxTokens = Number.parseInt(process.env.PROCTOR_AI_MAX_OUTPUT_TOKENS ?? "", 10);
@@ -15,7 +15,7 @@ const resolveMaxOutputTokens = () => {
     return DEFAULT_MAX_OUTPUT_TOKENS;
   }
 
-  return Math.min(rawMaxTokens, 4000);
+  return Math.min(rawMaxTokens, 16000);
 };
 
 const extractResponseText = (payload: unknown) => {
@@ -106,6 +106,7 @@ const analyzeWithAnthropic = async ({ imageDataUrl, source }: AnalyzeCaptureInpu
     body: JSON.stringify({
       model,
       max_tokens: resolveMaxOutputTokens(),
+      thinking: { type: "enabled", budget_tokens: 8000 },
       system: promptWithKnowledge,
       messages: [
         {
